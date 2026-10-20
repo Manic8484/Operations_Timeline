@@ -16,6 +16,8 @@ init_board_auth(app)
 TIMELINES = {
     'prebooked': dict(title='Prebooked Pickups', view='public.v_timeline_prebooked',
                       future_minutes=240, past_minutes=35, stale_hours=24),
+    'delivery': dict(title='Delivery Deadlines', view='public.v_timeline_delivery',
+                     future_minutes=240, past_minutes=35, stale_hours=24),
 }
 
 def db_connect():
@@ -65,11 +67,12 @@ def job_detail(job_ref):
                  goods, special_instructions, despatch_instructions, freedom_status,
                  cancelled_at FROM public.freedom_jobs WHERE job_ref=%s''', (job_ref,)).fetchone()
         if job is None: return jsonify(ok=False,error='Job not found'),404
-        permitted = conn.execute('SELECT 1 FROM public.v_timeline_prebooked WHERE job_ref=%s', (job_ref,)).fetchone()
+        permitted = conn.execute('''SELECT 1 FROM public.v_timeline_prebooked WHERE job_ref=%s
+                   UNION ALL SELECT 1 FROM public.v_timeline_delivery WHERE job_ref=%s''', (job_ref,job_ref)).fetchone()
         if not permitted: return jsonify(ok=False,error='Job is not on this timeline'),404
         stops = json_rows(conn.execute('''SELECT stop_id,drop_order,drop_type,address_name,
              address_line_1,address_line_2,postcode,country_code,required_from,required_to,
-             arrived_at,date_completed FROM public.freedom_stops
+             arrived_at,date_completed,deadline_at FROM public.freedom_stops
              WHERE job_ref=%s ORDER BY drop_order,stop_id''',(job_ref,)).fetchall())
         notes = json_rows(conn.execute('''SELECT id,source,sender,subject,note_text,received_at,created_at
              FROM public.job_notes WHERE job_ref=%s
@@ -88,8 +91,9 @@ def media_download(media_id):
                            (media_id,)).fetchone()
         if row is None: abort(404)
         # Prevent direct media URL access to unrelated/non-qualifying jobs.
-        allowed = conn.execute('''SELECT 1 FROM public.v_timeline_prebooked WHERE job_ref=%s''',
-                               (row['job_ref'],)).fetchone()
+        allowed = conn.execute('''''SELECT 1 FROM public.v_timeline_prebooked WHERE job_ref=%s
+                   UNION ALL SELECT 1 FROM public.v_timeline_delivery WHERE job_ref=%s''''',
+                               (row['job_ref'],row['job_ref'])).fetchone()
         if not allowed: abort(403)
     blob = storage.Client().bucket(row['storage_bucket']).blob(row['storage_object'])
     data = blob.download_as_bytes()

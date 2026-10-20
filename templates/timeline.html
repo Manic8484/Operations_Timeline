@@ -13,17 +13,29 @@ main{padding:14px 16px}.legend{display:flex;gap:18px;font-size:12px;align-items:
 .lane,.track{min-height:48px}.stale .lane-label{color:#b91c1c}.overdue-panel{margin-top:12px;padding:12px}.overdue-list{display:flex;flex-wrap:wrap;gap:9px}.overdue-list button{border:1px solid #991b1b;background:#b91c1c;color:#fff;font-size:12px}.empty{padding:20px;color:#64748b}
 dialog{width:min(850px,94vw);max-height:88vh;border:0;border-radius:10px;padding:0;box-shadow:0 10px 50px #0005}dialog::backdrop{background:#17233380}.modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;border-bottom:1px solid #d8e0e8}.modal-body{padding:15px;overflow:auto;max-height:74vh}.detail-grid{display:grid;grid-template-columns:145px 1fr;gap:7px 12px;font-size:13px}.detail-grid dt{font-weight:bold;color:#526071}.detail-grid dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.section{margin-top:18px;border-top:1px solid #dce2e9;padding-top:10px}.section h3{font-size:14px;margin:4px 0 8px}.section p{font-size:12px;white-space:pre-wrap}.stops{border-collapse:collapse;width:100%;font-size:12px}.stops td,.stops th{padding:7px;border-bottom:1px solid #e7eaf0;text-align:left}.media-list{display:flex;gap:12px;flex-wrap:wrap}.media-list a{font-size:12px;overflow-wrap:anywhere}.error{color:#b91c1c}
 @media(max-width:700px){.ruler,.lane{grid-template-columns:110px minmax(0,1fr)}.ruler-label,.lane-label{padding:7px}main{padding:8px}.job{width:116px;min-width:0;max-width:116px}}
+
+/* Delivery-deadline board states; same compact card geometry. */
+.job.deadline{background:#d97706;color:#fff;border-color:#b45309}
+.job.nearing{background:#e11d48;color:#fff;border-color:#be123c}
+.job.overdue{background:#b91c1c;color:#fff;border-color:#991b1b}
 </style></head>
 <body>
 <header><h1 id="heading">{{ timelines[selected].title }}</h1><div class="right"><label for="selector">Timeline</label><select id="selector">{% for code,board in timelines.items() %}<option value="{{ code }}"{% if code==selected %} selected{% endif %}>{{ board.title }}</option>{% endfor %}</select><span id="clock" class="muted"></span><span id="health" class="muted">Loading…</span></div></header>
-<main><div class="legend"><span><i class="dot" style="background:#2563eb"></i>Upcoming</span><span><i class="dot" style="background:#b91c1c"></i>Overdue</span><span>Arrived / collected / cancelled → removed on next update</span><span class="status">Next 4 hours · refresh 30 seconds</span></div>
+<main><div class="legend"><span id="legend-upcoming"><i class="dot" style="background:#2563eb"></i>Upcoming</span><span id="legend-warning" hidden><i class="dot" style="background:#e11d48"></i>Within 15 minutes</span><span><i class="dot" style="background:#b91c1c"></i>Overdue</span><span id="legend-removal">Arrived / collected / cancelled → removed on next update</span><span class="status">Next 4 hours · refresh 30 seconds</span></div>
 <section class="panel"><div class="ruler"><div class="ruler-label">Allocation</div><div class="ruler-track" id="ruler"></div></div><div id="lanes"><div class="empty">Loading jobs…</div></div></section>
-<section class="panel overdue-panel" id="older" hidden><strong>Older overdue pickups</strong><p class="muted" style="font-size:12px">Still awaiting an arrival or collection event. These remain visible after leaving the timeline.</p><div class="overdue-list" id="older-list"></div></section></main>
+<section class="panel overdue-panel" id="older" hidden><strong id="older-title">Older overdue pickups</strong><p class="muted" style="font-size:12px">Outstanding items remain visible after leaving the timeline.</p><div class="overdue-list" id="older-list"></div></section></main>
 <dialog id="details"><div class="modal-head"><strong id="modal-title">Job details</strong><button id="close-dialog" type="button" aria-label="Close">×</button></div><div class="modal-body" id="modal-content">Loading…</div></dialog>
 <script>
 const BOARD={{ selected|tojson }};
 const configs={{ timelines|tojson }};
 const config=configs[BOARD];
+const deliveryBoard=BOARD==='delivery';
+if(deliveryBoard){
+ document.getElementById('legend-upcoming').innerHTML='<i class="dot" style="background:#d97706"></i>Deadline upcoming';
+ document.getElementById('legend-warning').hidden=false;
+ document.getElementById('legend-removal').textContent='Delivered / cancelled → removed on next update';
+ document.getElementById('older-title').textContent='Older overdue deliveries';
+}
 const total=config.past_minutes+config.future_minutes;
 const nowPct=100*config.past_minutes/total;
 const region=document.getElementById('lanes'), ruler=document.getElementById('ruler');
@@ -61,12 +73,15 @@ function render(){
    let level=0;
    while(positions.some(p=>p.level===level && x<p.x+markerPct && p.x<x+markerPct))level++;
    positions.push({x,level});
-   const b=el('button',undefined,'job'+(minsUntil(j.critical_at,now)<=0?' overdue':''));
+   const until=minsUntil(j.critical_at,now);
+   const colourClass=deliveryBoard?(until<=0?' overdue':until<=15?' nearing':' deadline'):(until<=0?' overdue':'');
+   const b=el('button',undefined,'job'+colourClass);
    b.type='button';b.style.left=x+'%';b.style.top=(7+level*32)+'px';
    const account=(j.account_name||'Job').trim().split(/\s+/)[0];
-   const caption=[account,j.vehicle_code||'',j.pickup_postcode||''].filter(Boolean).join(' · ');
+   const postcode=deliveryBoard?(j.delivery_postcode||j.pickup_postcode):j.pickup_postcode;
+   const caption=[account,j.vehicle_code||'',postcode||''].filter(Boolean).join(' · ');
    b.append(el('span',caption,'compact-text'));
-   b.title=[j.account_name||'Job',j.job_ref,j.vehicle_code||'',j.pickup_postcode||'',timeFormat.format(new Date(j.critical_at))].filter(Boolean).join(' · ');
+   b.title=[j.account_name||'Job',j.job_ref,j.vehicle_code||'',postcode||'',timeFormat.format(new Date(j.critical_at))].filter(Boolean).join(' · ');
    b.setAttribute('aria-label',b.title);
    b.addEventListener('click',()=>openJob(j.job_ref));track.append(b);
  }
@@ -77,8 +92,8 @@ async function load(){if(loadBusy)return;loadBusy=true;try{const res=await fetch
 function addField(dl,label,value){dl.append(el('dt',label),el('dd',fmt(value)))}
 async function openJob(ref){const sequence=++detailSequence;document.getElementById('modal-title').textContent='Job '+ref;modalContent.replaceChildren(el('p','Loading details…'));modal.showModal();try{const r=await fetch('/api/job-board/'+encodeURIComponent(ref),{credentials:'same-origin',cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'Detail unavailable');if(sequence!==detailSequence||!modal.open)return;renderDetail(d)}catch(e){if(sequence===detailSequence)modalContent.replaceChildren(el('p',e.message,'error'))}}
 function section(title){const s=el('section',undefined,'section');s.append(el('h3',title));modalContent.append(s);return s}
-function renderDetail(d){modalContent.replaceChildren();const j=d.job;const dl=el('dl',undefined,'detail-grid');for(const [k,v] of [['Account',j.account_name],['Account Ref',j.account_ref],['Driver', [j.driver_callsign,j.driver_firstname,j.driver_lastname].filter(Boolean).join(' ')],['External agent',[j.agent_code,j.agent_name].filter(Boolean).join(' ')],['Vehicle',[j.vehicle_code,j.vehicle_description].filter(Boolean).join(' · ')],['Pickup time',j.booked_at],['Freedom status',j.freedom_status],['Goods',j.goods],['Special instructions',j.special_instructions],['Despatch instructions',j.despatch_instructions]])addField(dl,k,v);modalContent.append(dl);
- const s=section('Stops');const table=el('table',undefined,'stops');const h=el('tr');for(const c of ['Stop','Location','Required','Arrived','Completed'])h.append(el('th',c));table.append(h);for(const st of d.stops){const tr=el('tr');for(const value of [st.drop_order,[st.address_name,st.address_line_1,st.postcode].filter(Boolean).join(', '),fmt(st.required_from),fmt(st.arrived_at),fmt(st.date_completed)])tr.append(el('td',value));table.append(tr)}s.append(table);
+function renderDetail(d){modalContent.replaceChildren();const j=d.job;const dl=el('dl',undefined,'detail-grid');for(const [k,v] of [['Account',j.account_name],['Account Ref',j.account_ref],['Driver', [j.driver_callsign,j.driver_firstname,j.driver_lastname].filter(Boolean).join(' ')],['External agent',[j.agent_code,j.agent_name].filter(Boolean).join(' ')],['Vehicle',[j.vehicle_code,j.vehicle_description].filter(Boolean).join(' · ')],['Booked time',j.booked_at],['Freedom status',j.freedom_status],['Goods',j.goods],['Special instructions',j.special_instructions],['Despatch instructions',j.despatch_instructions]])addField(dl,k,v);modalContent.append(dl);
+ const s=section('Stops');const table=el('table',undefined,'stops');const h=el('tr');for(const c of ['Stop','Location','Required','Deadline','Arrived','Completed'])h.append(el('th',c));table.append(h);for(const st of d.stops){const tr=el('tr');for(const value of [st.drop_order,[st.address_name,st.address_line_1,st.postcode].filter(Boolean).join(', '),fmt(st.required_from),fmt(st.deadline_at),fmt(st.arrived_at),fmt(st.date_completed)])tr.append(el('td',value));table.append(tr)}s.append(table);
  const n=section('Notes ('+d.notes.length+')');if(!d.notes.length)n.append(el('p','No notes'));for(const note of d.notes)n.append(el('p',[note.source,note.sender,fmt(note.received_at||note.created_at),note.note_text||note.subject].filter(Boolean).join(' · ')));
  const m=section('Media ('+d.media.length+')');if(!d.media.length)m.append(el('p','No media'));const links=el('div',undefined,'media-list');for(const media of d.media){const a=el('a',media.original_filename||media.caption||'Open media');a.href=media.url;a.target='_blank';a.rel='noopener noreferrer';links.append(a)}m.append(links)}
 document.getElementById('close-dialog').onclick=()=>modal.close();modal.addEventListener('close',()=>detailSequence++);
