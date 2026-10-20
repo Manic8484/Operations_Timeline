@@ -16,12 +16,12 @@ dialog{width:min(850px,94vw);max-height:88vh;border:0;border-radius:10px;padding
 
 /* Delivery-deadline board states; same compact card geometry. */
 .job.deadline{background:#d97706;color:#fff;border-color:#b45309}
-.job.nearing{background:#e11d48;color:#fff;border-color:#be123c}
+.job.nearing{background:#f9a8d4;color:#831843;border-color:#db2777}
 .job.overdue{background:#b91c1c;color:#fff;border-color:#991b1b}
 </style></head>
 <body>
 <header><h1 id="heading">{{ timelines[selected].title }}</h1><div class="right"><label for="selector">Timeline</label><select id="selector">{% for code,board in timelines.items() %}<option value="{{ code }}"{% if code==selected %} selected{% endif %}>{{ board.title }}</option>{% endfor %}</select><span id="clock" class="muted"></span><span id="health" class="muted">Loading…</span></div></header>
-<main><div class="legend"><span id="legend-upcoming"><i class="dot" style="background:#2563eb"></i>Upcoming</span><span id="legend-warning" hidden><i class="dot" style="background:#e11d48"></i>Within 15 minutes</span><span><i class="dot" style="background:#b91c1c"></i>Overdue</span><span id="legend-removal">Arrived / collected / cancelled → removed on next update</span><span class="status">Next 4 hours · refresh 30 seconds</span></div>
+<main><div class="legend"><span id="legend-upcoming"><i class="dot" style="background:#2563eb"></i>Upcoming</span><span id="legend-warning" hidden><i class="dot" style="background:#f9a8d4"></i>Within 15 minutes</span><span><i class="dot" style="background:#b91c1c"></i>Overdue</span><span id="legend-removal">Arrived / collected / cancelled → removed on next update</span><span class="status">Next 4 hours · refresh 30 seconds</span></div>
 <section class="panel"><div class="ruler"><div class="ruler-label">Allocation</div><div class="ruler-track" id="ruler"></div></div><div id="lanes"><div class="empty">Loading jobs…</div></div></section>
 <section class="panel overdue-panel" id="older" hidden><strong id="older-title">Older overdue pickups</strong><p class="muted" style="font-size:12px">Outstanding items remain visible after leaving the timeline.</p><div class="overdue-list" id="older-list"></div></section></main>
 <dialog id="details"><div class="modal-head"><strong id="modal-title">Job details</strong><button id="close-dialog" type="button" aria-label="Close">×</button></div><div class="modal-body" id="modal-content">Loading…</div></dialog>
