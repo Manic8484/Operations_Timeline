@@ -4,6 +4,7 @@ import os
 import re
 import hmac
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
@@ -137,7 +138,10 @@ def _check_ingest_token():
 def _same_origin():
     # Protect browser cookie-authenticated writes from cross-site form requests.
     origin = request.headers.get('Origin', '')
-    if not origin or origin.rstrip('/') != request.host_url.rstrip('/'):
+    parsed = urlparse(origin)
+    # Compare the public host, not Flask's internally observed scheme: Cloud Run
+    # terminates HTTPS before forwarding the request to Flask over HTTP.
+    if parsed.scheme != 'https' or parsed.netloc != request.host or parsed.path not in ('', '/'):
         abort(403)
 
 

@@ -139,7 +139,12 @@ function renderCallback(d){
  async function update(payload){
    save.disabled=true;reset.disabled=true;remove.disabled=true;
    try {const r=await fetch('/api/callback/'+encodeURIComponent(d.job.job_ref)+'/settings',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Unable to save');modal.close();await load();}
+   const raw=await r.text();let j;
+   try{j=JSON.parse(raw)}catch(_){
+     throw Error('Save failed (HTTP '+r.status+'). The server returned HTML instead of JSON; check the Cloud Run log for /api/callback settings.');
+   }
+   if(!r.ok||!j.ok)throw Error(j.error||('Unable to save (HTTP '+r.status+')'));
+   modal.close();await load();}
    catch(e){alert(e.message)}finally{save.disabled=false;reset.disabled=false;remove.disabled=false}
  }
  save.onclick=()=>{const n=Number(input.value);if(!Number.isInteger(n)||n<1||n>1440){alert('Enter 1–1440 minutes');return}
