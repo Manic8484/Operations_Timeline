@@ -51,7 +51,22 @@ const modal=document.getElementById('details'), modalContent=document.getElement
 let jobs=[],lastLoaded=null,loadBusy=false,detailSequence=0;
 const timeFormat=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/London',hour:'2-digit',minute:'2-digit'});
 function el(tag,text,cls){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined&&text!==null)n.textContent=String(text);return n}
-function fmt(value){if(value===null||value===undefined||value==='')return '—';if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T/.test(value)){const d=new Date(value);return Number.isNaN(d.getTime())?value:new Intl.DateTimeFormat('en-GB',{dateStyle:'short',timeStyle:'short',timeZone:'Europe/London'}).format(d)}return String(value)}
+// Flask serialises datetimes as RFC 1123 (e.g. Wed, 21 Oct 2026 10:35:17 GMT).
+// Format both RFC 1123 and ISO 8601 timestamps in UK civil time (BST/GMT).
+const ukDateTimeFormat=new Intl.DateTimeFormat('en-GB',{dateStyle:'short',timeStyle:'short',timeZone:'Europe/London'});
+function fmt(value){
+ if(value===null||value===undefined||value==='')return '—';
+ if(typeof value==='string'){
+  const v=value.trim();
+  const isIso=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v);
+  const isRfc=/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),? .+ (?:GMT|UTC)$/i.test(v);
+  if(isIso||isRfc){
+   const d=new Date(v);
+   if(!Number.isNaN(d.getTime()))return ukDateTimeFormat.format(d);
+  }
+ }
+ return String(value);
+}
 function minsUntil(when,now){return (Date.parse(when)-now)/60000}
 function pos(when,now){return 100*(config.past_minutes+minsUntil(when,now))/total}
 function render(){
