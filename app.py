@@ -1,11 +1,13 @@
-"""Read-only Operations Timeline. Freedom is authoritative; no ingest or write routes."""
+"""Operations Timeline: Freedom job mirror plus local callback state."""
 from __future__ import annotations
 import os
+import re
+import hmac
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
-from flask import Flask, Response, abort, jsonify, redirect, render_template, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, url_for, request
 from google.cloud import storage
 from board_auth import init_board_auth
 
@@ -17,6 +19,8 @@ TIMELINES = {
     'prebooked': dict(title='Prebooked Pickups', view='public.v_timeline_prebooked',
                       future_minutes=240, past_minutes=35, stale_hours=24),
     'delivery': dict(title='Delivery Deadlines', view='public.v_timeline_delivery',
+                     future_minutes=240, past_minutes=35, stale_hours=24),
+    'callback': dict(title='Callbacks', view='public.v_timeline_callback',
                      future_minutes=240, past_minutes=35, stale_hours=24),
 }
 
@@ -68,7 +72,8 @@ def job_detail(job_ref):
                  cancelled_at FROM public.freedom_jobs WHERE job_ref=%s''', (job_ref,)).fetchone()
         if job is None: return jsonify(ok=False,error='Job not found'),404
         permitted = conn.execute('''SELECT 1 FROM public.v_timeline_prebooked WHERE job_ref=%s
-                   UNION ALL SELECT 1 FROM public.v_timeline_delivery WHERE job_ref=%s''', (job_ref,job_ref)).fetchone()
+                   UNION ALL SELECT 1 FROM public.v_timeline_delivery WHERE job_ref=%s
+                   UNION ALL SELECT 1 FROM public.v_timeline_callback WHERE job_ref=%s''', (job_ref,job_ref,job_ref)).fetchone()
         if not permitted: return jsonify(ok=False,error='Job is not on this timeline'),404
         stops = json_rows(conn.execute('''SELECT stop_id,drop_order,drop_type,address_name,
              address_line_1,address_line_2,postcode,country_code,required_from,required_to,
@@ -77,11 +82,19 @@ def job_detail(job_ref):
         notes = json_rows(conn.execute('''SELECT id,source,sender,subject,note_text,received_at,created_at
              FROM public.job_notes WHERE job_ref=%s
              ORDER BY COALESCE(received_at,created_at),id''',(job_ref,)).fetchall())
+        callbacks = conn.execute('''SELECT callback_count,last_callback_at,critical_at AS next_due_at,
+                          first_override_minutes, is_priority, required_from, booked_at
+                          FROM public.v_timeline_callback WHERE job_ref=%s''',(job_ref,)).fetchone()
+        state = conn.execute('''SELECT first_override_minutes,is_suppressed,suppression_reason
+                         FROM public.job_callback_state WHERE job_ref=%s''',(job_ref,)).fetchone()
+        events = json_rows(conn.execute('''SELECT action_label,message_time
+                     FROM public.job_callback_events WHERE job_ref=%s
+                     ORDER BY message_time DESC LIMIT 10''',(job_ref,)).fetchall())
         media = json_rows(conn.execute('''SELECT id,source,caption,original_filename,content_type,
              received_at,created_at FROM public.job_media WHERE job_ref=%s
              ORDER BY COALESCE(received_at,created_at),id''',(job_ref,)).fetchall())
     for m in media: m['url'] = url_for('media_download', media_id=m['id'])
-    return jsonify(ok=True,job=dict(job),stops=stops,notes=notes,media=media)
+    return jsonify(ok=True,job=dict(job),stops=stops,notes=notes,media=media,callbacks=dict(callbacks) if callbacks else None,callback_state=dict(state) if state else None,callback_events=events)
 
 @app.get('/job-media/<int:media_id>')
 def media_download(media_id):
@@ -92,8 +105,9 @@ def media_download(media_id):
         if row is None: abort(404)
         # Prevent direct media URL access to unrelated/non-qualifying jobs.
         allowed = conn.execute('''''SELECT 1 FROM public.v_timeline_prebooked WHERE job_ref=%s
-                   UNION ALL SELECT 1 FROM public.v_timeline_delivery WHERE job_ref=%s''''',
-                               (row['job_ref'],row['job_ref'])).fetchone()
+                   UNION ALL SELECT 1 FROM public.v_timeline_delivery WHERE job_ref=%s
+                   UNION ALL SELECT 1 FROM public.v_timeline_callback WHERE job_ref=%s''''',
+                               (row['job_ref'],row['job_ref'],row['job_ref'])).fetchone()
         if not allowed: abort(403)
     blob = storage.Client().bucket(row['storage_bucket']).blob(row['storage_object'])
     data = blob.download_as_bytes()
@@ -101,6 +115,101 @@ def media_download(media_id):
     return Response(data, mimetype=row['content_type'] or 'application/octet-stream',
                     headers={'Content-Disposition':f'inline; filename="{filename}"',
                              'Cache-Control':'no-store'})
+
+
+CALLBACK_ACTIONS = {'First Callback', 'Second Callback'}
+
+
+def _callback_ref(value):
+    value = str(value or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,39}', value):
+        raise ValueError('Invalid job reference')
+    return value
+
+
+def _check_ingest_token():
+    expected = os.environ.get('INGEST_TOKEN')
+    provided = request.headers.get('X-Ingest-Token', '')
+    if not expected or not hmac.compare_digest(expected, provided):
+        abort(401)
+
+
+def _same_origin():
+    # Protect browser cookie-authenticated writes from cross-site form requests.
+    origin = request.headers.get('Origin', '')
+    if not origin or origin.rstrip('/') != request.host_url.rstrip('/'):
+        abort(403)
+
+
+@app.post('/api/ingest/callback')
+def ingest_callback():
+    # IMPORTANT: board_auth must exempt THIS endpoint from browser Firebase auth,
+    # while keeping its X-Ingest-Token check below. See README before deployment.
+    _check_ingest_token()
+    if not request.is_json: return jsonify(ok=False,error='JSON required'),415
+    body = request.get_json(silent=True)
+    if not isinstance(body,dict): return jsonify(ok=False,error='Invalid JSON'),400
+    try:
+        job_ref = _callback_ref(body.get('job_no'))
+        action = str(body.get('action') or '').strip()
+        if action not in CALLBACK_ACTIONS: raise ValueError('Invalid callback action')
+        message_id = str(body.get('message_id') or '').strip()
+        if not 1 <= len(message_id) <= 512: raise ValueError('message_id required')
+        raw_ts = str(body.get('message_time') or '').strip()
+        event_at = datetime.fromisoformat(raw_ts.replace('Z','+00:00'))
+        if event_at.tzinfo is None: raise ValueError('message_time must have timezone')
+        if event_at > datetime.now(timezone.utc)+timedelta(minutes=5):
+            raise ValueError('message_time is in the future')
+    except (ValueError,TypeError) as ex:
+        return jsonify(ok=False,error=str(ex)),400
+    with db_connect() as conn:
+        exists = conn.execute('SELECT 1 FROM public.freedom_jobs WHERE job_ref=%s',(job_ref,)).fetchone()
+        if not exists: return jsonify(ok=False,error='Unknown job'),404
+        inserted = conn.execute('''INSERT INTO public.job_callback_events
+           (message_id,job_ref,action_label,message_time) VALUES (%s,%s,%s,%s)
+           ON CONFLICT (message_id) DO NOTHING RETURNING message_id''',
+           (message_id,job_ref,action,event_at)).fetchone()
+        stats = conn.execute('''SELECT count(*)::integer AS callback_count,
+                 max(message_time) AS last_callback_at
+                 FROM public.job_callback_events WHERE job_ref=%s''',(job_ref,)).fetchone()
+        current = conn.execute('''SELECT critical_at FROM public.v_timeline_callback
+                         WHERE job_ref=%s''',(job_ref,)).fetchone()
+    return jsonify(ok=True,status='accepted' if inserted else 'duplicate',job_no=job_ref,
+                   callback_count=stats['callback_count'],last_callback_at=stats['last_callback_at'],
+                   next_due_at=current['critical_at'] if current else None)
+
+
+@app.post('/api/callback/<job_ref>/settings')
+def callback_settings(job_ref):
+    _same_origin()
+    job_ref=_callback_ref(job_ref)
+    if not request.is_json: return jsonify(ok=False,error='JSON required'),415
+    body=request.get_json(silent=True)
+    if not isinstance(body,dict): return jsonify(ok=False,error='Invalid JSON'),400
+    allowed={'first_override_minutes','is_suppressed','suppression_reason'}
+    if not body or set(body)-allowed: return jsonify(ok=False,error='Invalid settings'),400
+    override=body.get('first_override_minutes')
+    if override is not None and (type(override) is not int or not 1<=override<=1440):
+        return jsonify(ok=False,error='Override must be 1-1440 minutes'),400
+    suppressed=body.get('is_suppressed',False)
+    if type(suppressed) is not bool: return jsonify(ok=False,error='Invalid suppression flag'),400
+    reason=str(body.get('suppression_reason') or '').strip()[:200] if suppressed else None
+    if suppressed and not reason: return jsonify(ok=False,error='Suppression reason required'),400
+    with db_connect() as conn:
+        valid=conn.execute('''SELECT 1 FROM public.freedom_jobs j
+           JOIN public.timeline_callback_vehicle_codes codes ON codes.vehicle_code=j.vehicle_code
+           WHERE j.job_ref=%s''',(job_ref,)).fetchone()
+        if not valid: return jsonify(ok=False,error='Job not eligible'),404
+        # Lock the state row; NULL override explicitly clears the override.
+        conn.execute('''INSERT INTO public.job_callback_state
+            (job_ref,first_override_minutes,is_suppressed,suppression_reason)
+            VALUES (%s,%s,%s,%s)
+            ON CONFLICT (job_ref) DO UPDATE SET
+              first_override_minutes=EXCLUDED.first_override_minutes,
+              is_suppressed=EXCLUDED.is_suppressed,
+              suppression_reason=EXCLUDED.suppression_reason,
+              updated_at=now()''',(job_ref,override,suppressed,reason))
+    return jsonify(ok=True,job_no=job_ref)
 
 @app.get('/health')
 def health():

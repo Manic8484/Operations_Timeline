@@ -18,6 +18,7 @@ dialog{width:min(850px,94vw);max-height:88vh;border:0;border-radius:10px;padding
 .job.deadline{background:#d97706;color:#fff;border-color:#b45309}
 .job.nearing{background:#f9a8d4;color:#831843;border-color:#db2777}
 .job.overdue{background:#b91c1c;color:#fff;border-color:#991b1b}
+.callback-actions{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:12px}.callback-actions label{font-size:12px;color:#526071;width:100%;font-weight:bold}.callback-actions input{width:125px;padding:7px;border:1px solid #c7d1df;border-radius:6px}.callback-actions button{font-size:12px}
 </style></head>
 <body>
 <header><h1 id="heading">{{ timelines[selected].title }}</h1><div class="right"><label for="selector">Timeline</label><select id="selector">{% for code,board in timelines.items() %}<option value="{{ code }}"{% if code==selected %} selected{% endif %}>{{ board.title }}</option>{% endfor %}</select><span id="clock" class="muted"></span><span id="health" class="muted">Loading…</span></div></header>
@@ -30,11 +31,18 @@ const BOARD={{ selected|tojson }};
 const configs={{ timelines|tojson }};
 const config=configs[BOARD];
 const deliveryBoard=BOARD==='delivery';
+const callbackBoard=BOARD==='callback';
 if(deliveryBoard){
  document.getElementById('legend-upcoming').innerHTML='<i class="dot" style="background:#d97706"></i>Deadline upcoming';
  document.getElementById('legend-warning').hidden=false;
  document.getElementById('legend-removal').textContent='Delivered / cancelled → removed on next update';
  document.getElementById('older-title').textContent='Older overdue deliveries';
+}
+if(callbackBoard){
+ document.getElementById('legend-upcoming').innerHTML='<i class="dot" style="background:#d97706"></i>Callback upcoming';
+ document.getElementById('legend-warning').hidden=false;
+ document.getElementById('legend-removal').textContent='Courier arrived / cancelled / suppressed → removed';
+ document.getElementById('older-title').textContent='Older overdue callbacks';
 }
 const total=config.past_minutes+config.future_minutes;
 const nowPct=100*config.past_minutes/total;
@@ -74,14 +82,14 @@ function render(){
    while(positions.some(p=>p.level===level && x<p.x+markerPct && p.x<x+markerPct))level++;
    positions.push({x,level});
    const until=minsUntil(j.critical_at,now);
-   const colourClass=deliveryBoard?(until<=0?' overdue':until<=15?' nearing':' deadline'):(until<=0?' overdue':'');
+   const colourClass=(deliveryBoard||callbackBoard)?(until<=0?' overdue':until<=15?' nearing':' deadline'):(until<=0?' overdue':'');
    const b=el('button',undefined,'job'+colourClass);
    b.type='button';b.style.left=x+'%';b.style.top=(7+level*32)+'px';
    const account=(j.account_name||'Job').trim().split(/\s+/)[0];
    const postcode=deliveryBoard?(j.delivery_postcode||j.pickup_postcode):j.pickup_postcode;
-   const caption=[account,j.vehicle_code||'',postcode||''].filter(Boolean).join(' · ');
+   const caption=[account,j.vehicle_code||'',postcode||'',callbackBoard?'CB'+(Number(j.callback_count||0)+1):''].filter(Boolean).join(' · ');
    b.append(el('span',caption,'compact-text'));
-   b.title=[j.account_name||'Job',j.job_ref,j.vehicle_code||'',postcode||'',timeFormat.format(new Date(j.critical_at))].filter(Boolean).join(' · ');
+   b.title=[j.account_name||'Job',j.job_ref,j.vehicle_code||'',postcode||'',callbackBoard?'Callback '+(Number(j.callback_count||0)+1):'',timeFormat.format(new Date(j.critical_at))].filter(Boolean).join(' · ');
    b.setAttribute('aria-label',b.title);
    b.addEventListener('click',()=>openJob(j.job_ref));track.append(b);
  }
@@ -93,9 +101,47 @@ function addField(dl,label,value){dl.append(el('dt',label),el('dd',fmt(value)))}
 async function openJob(ref){const sequence=++detailSequence;document.getElementById('modal-title').textContent='Job '+ref;modalContent.replaceChildren(el('p','Loading details…'));modal.showModal();try{const r=await fetch('/api/job-board/'+encodeURIComponent(ref),{credentials:'same-origin',cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'Detail unavailable');if(sequence!==detailSequence||!modal.open)return;renderDetail(d)}catch(e){if(sequence===detailSequence)modalContent.replaceChildren(el('p',e.message,'error'))}}
 function section(title){const s=el('section',undefined,'section');s.append(el('h3',title));modalContent.append(s);return s}
 function renderDetail(d){modalContent.replaceChildren();const j=d.job;const dl=el('dl',undefined,'detail-grid');for(const [k,v] of [['Account',j.account_name],['Account Ref',j.account_ref],['Driver', [j.driver_callsign,j.driver_firstname,j.driver_lastname].filter(Boolean).join(' ')],['External agent',[j.agent_code,j.agent_name].filter(Boolean).join(' ')],['Vehicle',[j.vehicle_code,j.vehicle_description].filter(Boolean).join(' · ')],['Booked time',j.booked_at],['Freedom status',j.freedom_status],['Goods',j.goods],['Special instructions',j.special_instructions],['Despatch instructions',j.despatch_instructions]])addField(dl,k,v);modalContent.append(dl);
+ if(callbackBoard)renderCallback(d);
  const s=section('Stops');const table=el('table',undefined,'stops');const h=el('tr');for(const c of ['Stop','Location','Required','Deadline','Arrived','Completed'])h.append(el('th',c));table.append(h);for(const st of d.stops){const tr=el('tr');for(const value of [st.drop_order,[st.address_name,st.address_line_1,st.postcode].filter(Boolean).join(', '),fmt(st.required_from),fmt(st.deadline_at),fmt(st.arrived_at),fmt(st.date_completed)])tr.append(el('td',value));table.append(tr)}s.append(table);
  const n=section('Notes ('+d.notes.length+')');if(!d.notes.length)n.append(el('p','No notes'));for(const note of d.notes)n.append(el('p',[note.source,note.sender,fmt(note.received_at||note.created_at),note.note_text||note.subject].filter(Boolean).join(' · ')));
  const m=section('Media ('+d.media.length+')');if(!d.media.length)m.append(el('p','No media'));const links=el('div',undefined,'media-list');for(const media of d.media){const a=el('a',media.original_filename||media.caption||'Open media');a.href=media.url;a.target='_blank';a.rel='noopener noreferrer';links.append(a)}m.append(links)}
+
+function renderCallback(d){
+ const c=d.callbacks||{}, st=d.callback_state||{};
+ const s=section('Callback Management');
+ const dl=el('dl',undefined,'detail-grid');
+ addField(dl,'Callbacks completed',c.callback_count===undefined?(d.callback_events||[]).length:c.callback_count);
+ addField(dl,'Last callback at',c.last_callback_at||(d.callback_events||[])[0]?.message_time);
+ addField(dl,'Next due',c.next_due_at);
+ addField(dl,'Priority',c.is_priority===undefined?'—':c.is_priority?'Priority':'Standard');
+ addField(dl,'Status',st.is_suppressed?'Suppressed':c.next_due_at?'Active':'Not currently eligible');
+ s.append(dl);
+ const edit=el('div',undefined,'callback-actions');
+ const l=el('label','First callback due (minutes after booking, ASAP only)');
+ const input=el('input');input.type='number';input.min='1';input.max='1440';input.placeholder=c.is_priority?'20':'45';input.value=st.first_override_minutes??'';
+ const save=el('button','Save override');save.type='button';
+ const reset=el('button','Clear override');reset.type='button';
+ async function update(payload){
+   save.disabled=true;reset.disabled=true;remove.disabled=true;
+   try {const r=await fetch('/api/callback/'+encodeURIComponent(d.job.job_ref)+'/settings',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Unable to save');modal.close();await load();}
+   catch(e){alert(e.message)}finally{save.disabled=false;reset.disabled=false;remove.disabled=false}
+ }
+ save.onclick=()=>{const n=Number(input.value);if(!Number.isInteger(n)||n<1||n>1440){alert('Enter 1–1440 minutes');return}
+  update({first_override_minutes:n,is_suppressed:!!st.is_suppressed,suppression_reason:st.suppression_reason||undefined});};
+ reset.onclick=()=>update({first_override_minutes:null,is_suppressed:!!st.is_suppressed,suppression_reason:st.suppression_reason||undefined});
+ edit.append(l,input,save,reset);
+ const reasonLabel=el('label','Callback suppression reason');
+ const reason=el('select');
+ for(const [value,label] of [['Collection at leisure','Collection at leisure'],['Client requests no callbacks','Client requests no callbacks'],['Other operational reason','Other operational reason']]){const opt=el('option',label);opt.value=value;reason.append(opt)}
+ if(st.suppression_reason)reason.value=st.suppression_reason;
+ const remove=el('button',st.is_suppressed?'Restore callbacks':'Remove from Callback Board');remove.type='button';
+ remove.onclick=()=>update({first_override_minutes:input.value===''?null:Number(input.value),is_suppressed:!st.is_suppressed,suppression_reason:!st.is_suppressed?reason.value:null});
+ edit.append(reasonLabel,reason,remove);s.append(edit);
+ const history=d.callback_events||[];
+ if(history.length){const p=el('p',history.map(e=>fmt(e.message_time)+' · '+e.action_label).join('\n'));s.append(p)}
+}
+
 document.getElementById('close-dialog').onclick=()=>modal.close();modal.addEventListener('close',()=>detailSequence++);
 document.getElementById('selector').onchange=e=>{location.href=e.target.value==='prebooked'?'/':'/board/'+encodeURIComponent(e.target.value)};
 load();setInterval(load,30000);setInterval(render,15000);

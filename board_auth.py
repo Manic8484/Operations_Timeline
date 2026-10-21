@@ -185,6 +185,11 @@ def init_board_auth(app):
         # Machine feeds retain their existing token authentication; don't
         # change feed routing during this first authentication rollout.
         machine_paths = {'/event-email', '/form-email', '/form-email-v2', '/schedule-sync'}
+        # Power Automate callback intake uses its own mandatory X-Ingest-Token
+        # validation in app.py; it must not require a Firebase browser session.
+        # Limit this exception to POST, not other methods or callback settings.
+        if request.path == '/api/ingest/callback' and request.method == 'POST':
+            return None
         if request.path in machine_paths:
             return None
         if request.path.startswith('/static/') or request.path in ('/auth/login', '/auth/session', '/auth/logout'):
