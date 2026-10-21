@@ -22,7 +22,7 @@ TIMELINES = {
     'delivery': dict(title='Delivery Deadlines', view='public.v_timeline_delivery',
                      future_minutes=240, past_minutes=35, stale_hours=24),
     'callback': dict(title='Callbacks', view='public.v_timeline_callback',
-                     future_minutes=240, past_minutes=35, stale_hours=24),
+                     future_minutes=60, past_minutes=35, stale_hours=24),
 }
 
 def db_connect():
