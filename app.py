@@ -55,10 +55,17 @@ def timeline_data(key):
     earliest = now - timedelta(hours=config['stale_hours'])
     latest = now + timedelta(minutes=config['future_minutes'])
     # View name comes exclusively from the source-code whitelist above.
-    query = (f"SELECT * FROM {config['view']} "
-             "WHERE critical_at >= %s AND critical_at <= %s ORDER BY critical_at, job_ref")
+    query = (f"SELECT v.* FROM {config['view']} AS v "
+             "WHERE v.critical_at >= %s AND v.critical_at <= %s ")
+    params = [earliest, latest]
+    if key in TIMELINE_REMOVAL_REASONS:
+        query += ("AND NOT EXISTS (SELECT 1 FROM public.timeline_job_suppressions s "
+                  "WHERE s.board_key = %s AND s.job_ref = v.job_ref "
+                  "AND s.is_suppressed = TRUE) ")
+        params.append(key)
+    query += "ORDER BY v.critical_at, v.job_ref"
     with db_connect() as conn:
-        rows = json_rows(conn.execute(query, (earliest, latest)).fetchall())
+        rows = json_rows(conn.execute(query, params).fetchall())
     return jsonify(ok=True, now=now.isoformat(), board=key,
                    future_minutes=config['future_minutes'],
                    past_minutes=config['past_minutes'], jobs=rows)
@@ -88,6 +95,9 @@ def job_detail(job_ref):
                           FROM public.v_timeline_callback WHERE job_ref=%s''',(job_ref,)).fetchone()
         state = conn.execute('''SELECT first_override_minutes,is_suppressed,suppression_reason
                          FROM public.job_callback_state WHERE job_ref=%s''',(job_ref,)).fetchone()
+        timeline_suppressions = json_rows(conn.execute('''SELECT board_key,is_suppressed,suppression_reason,updated_at
+                         FROM public.timeline_job_suppressions
+                         WHERE job_ref=%s AND board_key IN ('prebooked','delivery')''', (job_ref,)).fetchall())
         events = json_rows(conn.execute('''SELECT action_label,message_time
                      FROM public.job_callback_events WHERE job_ref=%s
                      ORDER BY message_time DESC LIMIT 10''',(job_ref,)).fetchall())
@@ -95,7 +105,9 @@ def job_detail(job_ref):
              received_at,created_at FROM public.job_media WHERE job_ref=%s
              ORDER BY COALESCE(received_at,created_at),id''',(job_ref,)).fetchall())
     for m in media: m['url'] = url_for('media_download', media_id=m['id'])
-    return jsonify(ok=True,job=dict(job),stops=stops,notes=notes,media=media,callbacks=dict(callbacks) if callbacks else None,callback_state=dict(state) if state else None,callback_events=events)
+    return jsonify(ok=True,job=dict(job),stops=stops,notes=notes,media=media,callbacks=dict(callbacks) if callbacks else None,callback_state=dict(state) if state else None,callback_events=events,
+                   timeline_suppressions={r['board_key']:r for r in timeline_suppressions},
+                   timeline_removal_reasons=TIMELINE_REMOVAL_REASONS)
 
 @app.get('/job-media/<int:media_id>')
 def media_download(media_id):
@@ -119,6 +131,13 @@ def media_download(media_id):
 
 
 CALLBACK_ACTIONS = {'First Callback', 'Second Callback'}
+
+# Independent, server-validated removal reasons for the other timeline boards.
+TIMELINE_REMOVAL_REASONS = {
+    'prebooked': ('Internal Booking', 'Other Operational Reason', 'Manual Override'),
+    'delivery': ('Manual Override', 'Deadline Not Guaranteed', 'Other Operational Reason'),
+}
+
 
 
 def _callback_ref(value):
@@ -214,6 +233,51 @@ def callback_settings(job_ref):
               suppression_reason=EXCLUDED.suppression_reason,
               updated_at=now()''',(job_ref,override,suppressed,reason))
     return jsonify(ok=True,job_no=job_ref)
+
+@app.post('/api/timeline/<key>/<job_ref>/suppression')
+def timeline_suppression_settings(key, job_ref):
+    # Remove or reinstate a job on this timeline only.
+    _same_origin()
+    reasons = TIMELINE_REMOVAL_REASONS.get(key)
+    if reasons is None:
+        abort(404)
+    try:
+        job_ref = _callback_ref(job_ref)
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    if not request.is_json:
+        return jsonify(ok=False, error='JSON required'), 415
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {'is_suppressed', 'suppression_reason'}:
+        return jsonify(ok=False, error='Expected is_suppressed and suppression_reason'), 400
+    suppressed = body['is_suppressed']
+    if type(suppressed) is not bool:
+        return jsonify(ok=False, error='Invalid suppression flag'), 400
+    reason = body['suppression_reason']
+    if suppressed:
+        if not isinstance(reason, str) or reason not in reasons:
+            return jsonify(ok=False, error='Choose an allowed removal reason'), 400
+    elif reason is not None:
+        return jsonify(ok=False, error='Reason must be null when reinstating a job'), 400
+
+    # Board view is selected solely from the server-side whitelist.
+    with db_connect() as conn:
+        eligible = conn.execute(
+            f"SELECT 1 FROM {TIMELINES[key]['view']} WHERE job_ref = %s LIMIT 1",
+            (job_ref,),
+        ).fetchone()
+        if not eligible:
+            return jsonify(ok=False, error='Job not eligible for this timeline'), 404
+        conn.execute('''INSERT INTO public.timeline_job_suppressions
+              (board_key, job_ref, is_suppressed, suppression_reason)
+              VALUES (%s, %s, %s, %s)
+              ON CONFLICT (board_key, job_ref) DO UPDATE SET
+                is_suppressed = EXCLUDED.is_suppressed,
+                suppression_reason = EXCLUDED.suppression_reason,
+                updated_at = now()''', (key, job_ref, suppressed, reason))
+    return jsonify(ok=True, board=key, job_no=job_ref,
+                   is_suppressed=suppressed, suppression_reason=reason)
+
 
 @app.get('/health')
 def health():
