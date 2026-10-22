@@ -117,9 +117,47 @@ async function openJob(ref){const sequence=++detailSequence;document.getElementB
 function section(title){const s=el('section',undefined,'section');s.append(el('h3',title));modalContent.append(s);return s}
 function renderDetail(d){modalContent.replaceChildren();const j=d.job;const dl=el('dl',undefined,'detail-grid');for(const [k,v] of [['Account',j.account_name],['Account Ref',j.account_ref],['Driver', [j.driver_callsign,j.driver_firstname,j.driver_lastname].filter(Boolean).join(' ')],['External agent',[j.agent_code,j.agent_name].filter(Boolean).join(' ')],['Vehicle',[j.vehicle_code,j.vehicle_description].filter(Boolean).join(' · ')],['Booked time',j.booked_at],['Freedom status',j.freedom_status],['Goods',j.goods],['Special instructions',j.special_instructions],['Despatch instructions',j.despatch_instructions]])addField(dl,k,v);modalContent.append(dl);
  if(callbackBoard)renderCallback(d);
+ if(BOARD==='prebooked'||deliveryBoard)renderTimelineRemoval(d);
  const s=section('Stops');const table=el('table',undefined,'stops');const h=el('tr');for(const c of ['Stop','Location','Required','Deadline','Arrived','Completed'])h.append(el('th',c));table.append(h);for(const st of d.stops){const tr=el('tr');for(const value of [st.drop_order,[st.address_name,st.address_line_1,st.postcode].filter(Boolean).join(', '),fmt(st.required_from),fmt(st.deadline_at),fmt(st.arrived_at),fmt(st.date_completed)])tr.append(el('td',value));table.append(tr)}s.append(table);
  const n=section('Notes ('+d.notes.length+')');if(!d.notes.length)n.append(el('p','No notes'));for(const note of d.notes)n.append(el('p',[note.source,note.sender,fmt(note.received_at||note.created_at),note.note_text||note.subject].filter(Boolean).join(' · ')));
  const m=section('Media ('+d.media.length+')');if(!d.media.length)m.append(el('p','No media'));const links=el('div',undefined,'media-list');for(const media of d.media){const a=el('a',media.original_filename||media.caption||'Open media');a.href=media.url;a.target='_blank';a.rel='noopener noreferrer';links.append(a)}m.append(links)}
+
+function renderTimelineRemoval(d){
+ const state=(d.timeline_suppressions||{})[BOARD]||{};
+ const suppressed=state.is_suppressed===true;
+ const title=deliveryBoard?'Delivery Deadline Management':'Prebooked Pickup Management';
+ const reasons=deliveryBoard
+   ? ['Manual Override','Deadline Not Guaranteed','Other Operational Reason']
+   : ['Internal Booking','Other Operational Reason','Manual Override'];
+ const s=section(title);
+ const info=el('dl',undefined,'detail-grid');
+ addField(info,'Timeline status',suppressed?'Removed':'Active');
+ if(suppressed)addField(info,'Removal reason',state.suppression_reason);
+ s.append(info);
+ const edit=el('div',undefined,'callback-actions');
+ const label=el('label','Reason for removal');
+ const reason=el('select');reason.setAttribute('aria-label','Reason for removal');
+ for(const value of reasons){const opt=el('option',value);opt.value=value;reason.append(opt)}
+ if(suppressed&&reasons.includes(state.suppression_reason))reason.value=state.suppression_reason;
+ const remove=el('button',suppressed?'Restore to Timeline':'Remove from Timeline');remove.type='button';
+ const message=el('span','');message.setAttribute('role','status');
+ remove.onclick=async()=>{
+   const removing=!suppressed;
+   const payload={is_suppressed:removing,suppression_reason:removing?reason.value:null};
+   remove.disabled=true;reason.disabled=true;message.textContent='Saving…';
+   try{
+     const response=await fetch('/api/timeline/'+encodeURIComponent(BOARD)+'/'+encodeURIComponent(d.job.job_ref)+'/suppression',{
+       method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
+     });
+     const raw=await response.text();let result;
+     try{result=JSON.parse(raw)}catch(_){throw Error('Save failed (HTTP '+response.status+'). Server returned HTML rather than JSON; check the Cloud Run log.')} 
+     if(!response.ok||!result.ok)throw Error(result.error||'Unable to update timeline');
+     modal.close();await load();
+   }catch(error){message.textContent=error.message;message.className='error';remove.disabled=false;reason.disabled=false}
+ };
+ if(!suppressed)edit.append(label,reason);
+ edit.append(remove,message);s.append(edit);
+}
 
 function renderCallback(d){
  const c=d.callbacks||{}, st=d.callback_state||{};
