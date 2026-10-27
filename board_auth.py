@@ -178,6 +178,9 @@ def init_board_auth(app):
         return response
 
     app.register_blueprint(bp)
+    # Device enrolment and signed board-side sessions, using the shared broker.
+    from device_sessions import bp as device_bp, identity as device_identity
+    app.register_blueprint(device_bp)
 
     @app.before_request
     def protect():
@@ -192,7 +195,7 @@ def init_board_auth(app):
             return None
         if request.path in machine_paths:
             return None
-        if request.path.startswith('/static/') or request.path in ('/auth/login', '/auth/session', '/auth/logout'):
+        if request.path.startswith('/static/') or request.path in ('/auth/login', '/auth/session', '/auth/logout', '/auth/device/start', '/auth/device/callback'):
             return None
         token = request.cookies.get(COOKIE_NAME)
         uid = None
@@ -207,7 +210,24 @@ def init_board_auth(app):
             except (BadSignature, SignatureExpired):
                 pass
         if not isinstance(uid, str) or not uid:
+            try:
+                device = device_identity()
+            except Exception:
+                app.logger.exception('Device permission check failed')
+                return jsonify(error='Authentication service unavailable'), 503
+            if device:
+                # The initial Operations Timeline device role is display-only.
+                # CSRF checking is not a substitute for authorisation: prohibit
+                # all writes by DEVICE identities, even with a valid Origin.
+                if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                    return jsonify(error='Device sessions are read-only'), 403
+                g.board_user = device
+                g.board_identity_type = 'DEVICE'
+                g.machine_authenticated = True
+                return None
             if request.path == '/' and request.method == 'GET':
+                if os.getenv('DEVICE_DEFAULT_LOGIN') == '1':
+                    return redirect(url_for('device_sessions.start'))
                 return redirect(url_for('board_auth.login'))
             return jsonify(error='Authentication required'), 401
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
